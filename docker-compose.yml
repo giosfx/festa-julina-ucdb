@@ -1,0 +1,98 @@
+version: '3.8'
+
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: festa-julina-sql
+    environment:
+      - ACCEPT_EULA=Y
+      - SA_PASSWORD=${SQL_PASSWORD:-YourStrong@Pass123}
+      - MSSQL_PID=Developer
+    ports:
+      - "1433:1433"
+    volumes:
+      - sql_data:/var/opt/mssql
+    networks:
+      - festa-julina-network
+    healthcheck:
+      test: /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P ${SQL_PASSWORD:-YourStrong@Pass123} -Q "SELECT 1" || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: festa-julina-keycloak
+    environment:
+      - KEYCLOAK_ADMIN=${KEYCLOAK_ADMIN:-admin}
+      - KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      - KC_DB=mssql
+      - KC_DB_URL=jdbc:sqlserver://sqlserver:1433;databaseName=keycloak;trustServerCertificate=true
+      - KC_DB_USERNAME=sa
+      - KC_DB_PASSWORD=${SQL_PASSWORD:-YourStrong@Pass123}
+      - KC_HTTP_ENABLED=true
+      - KC_HOSTNAME_STRICT=false
+      - KC_HOSTNAME_STRICT_HTTPS=false
+    command: start-dev
+    ports:
+      - "8080:8080"
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    networks:
+      - festa-julina-network
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080 && echo -e \"GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3 && grep -q \"200 OK\" <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  backend:
+    build:
+      context: ./src
+      dockerfile: API/Dockerfile
+    container_name: festa-julina-api
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_URLS=http://+:5000
+      - ConnectionStrings__LegacyDb=Server=sqlserver;Database=LegacyAcademic;User Id=sa;Password=${SQL_PASSWORD:-YourStrong@Pass123};TrustServerCertificate=true
+      - ConnectionStrings__DiscountDb=Server=sqlserver;Database=DiscountManagement;User Id=sa;Password=${SQL_PASSWORD:-YourStrong@Pass123};TrustServerCertificate=true
+      - Keycloak__AuthServerUrl=http://keycloak:8080
+      - Keycloak__Realm=festa-julina
+      - Keycloak__ClientId=festa-julina-api
+      - Keycloak__ClientSecret=${KEYCLOAK_CLIENT_SECRET:-your-client-secret}
+    ports:
+      - "5000:5000"
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks:
+      - festa-julina-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: festa-julina-frontend
+    environment:
+      - VITE_API_URL=http://localhost:5000
+      - VITE_KEYCLOAK_URL=http://localhost:8080
+      - VITE_KEYCLOAK_REALM=festa-julina
+      - VITE_KEYCLOAK_CLIENT_ID=festa-julina-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - festa-julina-network
+
+networks:
+  festa-julina-network:
+    driver: bridge
+
+volumes:
+  sql_data:
